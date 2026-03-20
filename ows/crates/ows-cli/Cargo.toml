@@ -25,6 +25,12 @@ tempfile = "3"
 rpassword = "7"
 serde = { version = "1", features = ["derive"] }
 zeroize = "1"
+ows-auth = { path = "../ows-auth", version = "=0.3.9", optional = true }
+tokio = { version = "1", features = ["rt"], optional = true }
+
+[features]
+default = ["passkey"]
+passkey = ["dep:ows-auth", "dep:tokio"]
 
 [dev-dependencies]
 ows-signer = { path = "../ows-signer", version = "=0.3.9", features = ["fast-kdf"] }

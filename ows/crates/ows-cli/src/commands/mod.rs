@@ -1,3 +1,5 @@
+#[cfg(feature = "passkey")]
+pub mod auth;
 pub mod config;
 pub mod derive;
 pub mod generate;
@@ -100,12 +102,32 @@ pub fn read_passphrase() -> Zeroizing<String> {
 }
 
 /// Look up a wallet by name or ID, decrypt it, and return the secret.
-/// Handles both mnemonic and private key wallets.
-pub fn resolve_wallet_secret(wallet_name: &str) -> Result<WalletSecret, CliError> {
+/// If the wallet uses passkey auth, runs passkey verification first (unless skip_passkey is true).
+pub fn resolve_wallet_secret(
+    wallet_name: &str,
+    skip_passkey: bool,
+) -> Result<WalletSecret, CliError> {
     let wallet = vault::load_wallet_by_name_or_id(wallet_name)?;
     let envelope: CryptoEnvelope = serde_json::from_value(wallet.crypto.clone())?;
 
-    // Try empty passphrase first, then prompt if it fails
+    #[cfg(feature = "passkey")]
+    let is_passkey = auth::get_auth_method(&wallet) == "passkey";
+    #[cfg(not(feature = "passkey"))]
+    let is_passkey = {
+        let _ = skip_passkey;
+        false
+    };
+
+    if is_passkey {
+        #[cfg(feature = "passkey")]
+        auth::require_passkey_for_wallet(&wallet, skip_passkey)?;
+
+        // Passkey wallets are encrypted with empty passphrase
+        let secret = ows_signer::decrypt(&envelope, "")?;
+        return to_wallet_secret(secret, &wallet);
+    }
+
+    // Passphrase wallet: try empty passphrase first, then prompt
     let secret = match ows_signer::decrypt(&envelope, "") {
         Ok(s) => s,
         Err(_) => {
@@ -114,6 +136,13 @@ pub fn resolve_wallet_secret(wallet_name: &str) -> Result<WalletSecret, CliError
         }
     };
 
+    to_wallet_secret(secret, &wallet)
+}
+
+fn to_wallet_secret(
+    secret: SecretBytes,
+    wallet: &ows_core::EncryptedWallet,
+) -> Result<WalletSecret, CliError> {
     match wallet.key_type {
         KeyType::Mnemonic => {
             let phrase =
@@ -147,16 +176,13 @@ fn extract_key_for_curve(
 }
 
 /// Resolve a wallet secret into the private key bytes for a specific chain.
-///
-/// This is the single place where `WalletSecret` → `SecretBytes` conversion
-/// happens, so signing commands don't duplicate HD derivation / key-pair
-/// extraction logic.
 pub fn resolve_signing_key(
     wallet_name: &str,
     chain_type: ows_core::ChainType,
     index: u32,
+    skip_passkey: bool,
 ) -> Result<SecretBytes, CliError> {
-    let wallet_secret = resolve_wallet_secret(wallet_name)?;
+    let wallet_secret = resolve_wallet_secret(wallet_name, skip_passkey)?;
     let signer = ows_signer::signer_for_chain(chain_type);
 
     match wallet_secret {

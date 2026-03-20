@@ -8,9 +8,10 @@ pub fn run(
     tx_hex: &str,
     index: u32,
     json_output: bool,
+    skip_passkey: bool,
 ) -> Result<(), CliError> {
     let chain = parse_chain(chain_str)?;
-    let key = super::resolve_signing_key(wallet_name, chain.chain_type, index)?;
+    let key = super::resolve_signing_key(wallet_name, chain.chain_type, index, skip_passkey)?;
 
     let tx_hex_clean = tx_hex.strip_prefix("0x").unwrap_or(tx_hex);
     let tx_bytes = hex::decode(tx_hex_clean)

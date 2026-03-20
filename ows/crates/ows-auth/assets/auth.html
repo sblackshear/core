@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OWS — Passkey Verification</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: #0a0a0a;
+    color: #e0e0e0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+  }
+  .card {
+    background: #1a1a1a;
+    border: 1px solid #333;
+    border-radius: 12px;
+    padding: 2.5rem;
+    max-width: 420px;
+    width: 90%;
+    text-align: center;
+  }
+  h1 {
+    font-size: 1.5rem;
+    font-weight: 600;
+    margin-bottom: 0.5rem;
+    color: #fff;
+  }
+  .subtitle {
+    color: #888;
+    font-size: 0.9rem;
+    margin-bottom: 2rem;
+  }
+  #status {
+    font-size: 1rem;
+    margin-bottom: 1.5rem;
+    min-height: 1.5em;
+  }
+  .spinner {
+    display: inline-block;
+    width: 20px;
+    height: 20px;
+    border: 2px solid #333;
+    border-top-color: #fff;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+    vertical-align: middle;
+    margin-right: 8px;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .success { color: #4ade80; }
+  .error { color: #f87171; }
+  .waiting { color: #facc15; }
+  .info { color: #888; font-size: 0.85rem; margin-top: 1.5rem; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>Open Wallet Standard</h1>
+  <p class="subtitle">Passkey Verification</p>
+  <div id="status"><span class="spinner"></span> Initializing...</div>
+  <p class="info" id="info"></p>
+</div>
+<script>
+(async function() {
+  const statusEl = document.getElementById('status');
+  const infoEl = document.getElementById('info');
+
+  function show(msg, cls) {
+    statusEl.innerHTML = cls === 'waiting'
+      ? '<span class="spinner"></span><span class="' + cls + '">' + msg + '</span>'
+      : '<span class="' + cls + '">' + msg + '</span>';
+  }
+
+  function showError(msg) {
+    show(msg, 'error');
+    infoEl.textContent = 'You can close this tab.';
+  }
+
+  // Check WebAuthn support
+  if (!window.PublicKeyCredential) {
+    showError('WebAuthn is not supported in this browser.');
+    return;
+  }
+
+  try {
+    // Get mode from server
+    const res = await fetch('/api/status');
+    const { mode } = await res.json();
+
+    if (mode === 'register') {
+      await doRegister();
+    } else {
+      await doAuthenticate();
+    }
+  } catch (e) {
+    showError('Error: ' + e.message);
+  }
+
+  async function doRegister() {
+    show('Starting passkey registration...', 'waiting');
+
+    // Get creation options
+    const beginRes = await fetch('/api/register/begin', { method: 'POST' });
+    if (!beginRes.ok) {
+      showError('Failed to start registration: ' + await beginRes.text());
+      return;
+    }
+    const options = await beginRes.json();
+
+    // Decode challenge and user.id from base64url
+    options.publicKey.challenge = b64urlToBytes(options.publicKey.challenge);
+    options.publicKey.user.id = b64urlToBytes(options.publicKey.user.id);
+    if (options.publicKey.excludeCredentials) {
+      for (const c of options.publicKey.excludeCredentials) {
+        c.id = b64urlToBytes(c.id);
+      }
+    }
+
+    show('Touch your fingerprint sensor or security key...', 'waiting');
+
+    let credential;
+    try {
+      credential = await navigator.credentials.create({ publicKey: options.publicKey });
+    } catch (e) {
+      showError('Registration cancelled or failed: ' + e.message);
+      return;
+    }
+
+    // Send credential to server
+    const credentialData = {
+      id: credential.id,
+      rawId: bytesToB64url(new Uint8Array(credential.rawId)),
+      type: credential.type,
+      response: {
+        attestationObject: bytesToB64url(new Uint8Array(credential.response.attestationObject)),
+        clientDataJSON: bytesToB64url(new Uint8Array(credential.response.clientDataJSON)),
+      },
+      extensions: credential.getClientExtensionResults(),
+    };
+
+    const completeRes = await fetch('/api/register/complete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(credentialData),
+    });
+
+    if (!completeRes.ok) {
+      showError('Registration failed: ' + await completeRes.text());
+      return;
+    }
+
+    show('Passkey registered successfully!', 'success');
+    infoEl.textContent = 'This tab will close automatically...';
+    setTimeout(() => window.close(), 3000);
+  }
+
+  async function doAuthenticate() {
+    show('Starting passkey verification...', 'waiting');
+
+    const beginRes = await fetch('/api/authenticate/begin', { method: 'POST' });
+    if (!beginRes.ok) {
+      showError('Failed to start authentication: ' + await beginRes.text());
+      return;
+    }
+    const options = await beginRes.json();
+
+    // Decode challenge and credential IDs
+    options.publicKey.challenge = b64urlToBytes(options.publicKey.challenge);
+    if (options.publicKey.allowCredentials) {
+      for (const c of options.publicKey.allowCredentials) {
+        c.id = b64urlToBytes(c.id);
+      }
+    }
+
+    show('Touch your fingerprint sensor or security key...', 'waiting');
+
+    let assertion;
+    try {
+      assertion = await navigator.credentials.get({ publicKey: options.publicKey });
+    } catch (e) {
+      showError('Authentication cancelled or failed: ' + e.message);
+      return;
+    }
+
+    const assertionData = {
+      id: assertion.id,
+      rawId: bytesToB64url(new Uint8Array(assertion.rawId)),
+      type: assertion.type,
+      response: {
+        authenticatorData: bytesToB64url(new Uint8Array(assertion.response.authenticatorData)),
+        clientDataJSON: bytesToB64url(new Uint8Array(assertion.response.clientDataJSON)),
+        signature: bytesToB64url(new Uint8Array(assertion.response.signature)),
+        userHandle: assertion.response.userHandle
+          ? bytesToB64url(new Uint8Array(assertion.response.userHandle))
+          : null,
+      },
+      extensions: assertion.getClientExtensionResults(),
+    };
+
+    const completeRes = await fetch('/api/authenticate/complete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(assertionData),
+    });
+
+    if (!completeRes.ok) {
+      showError('Verification failed: ' + await completeRes.text());
+      return;
+    }
+
+    show('Identity verified!', 'success');
+    infoEl.textContent = 'This tab will close automatically...';
+    setTimeout(() => window.close(), 3000);
+  }
+
+  // Base64url helpers
+  function b64urlToBytes(b64url) {
+    const b64 = b64url.replace(/-/g, '+').replace(/_/g, '/');
+    const pad = b64.length % 4 === 0 ? '' : '='.repeat(4 - (b64.length % 4));
+    const binary = atob(b64 + pad);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    return bytes.buffer;
+  }
+
+  function bytesToB64url(bytes) {
+    let binary = '';
+    for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+    return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  }
+})();
+</script>
+</body>
+</html>

@@ -38,6 +38,12 @@ enum Commands {
         #[command(subcommand)]
         subcommand: ConfigCommands,
     },
+    /// Manage passkey authentication
+    #[cfg(feature = "passkey")]
+    Auth {
+        #[command(subcommand)]
+        subcommand: AuthCommands,
+    },
     /// Update ows to the latest release
     Update {
         /// Re-download even if already on the latest version
@@ -65,6 +71,9 @@ enum WalletCommands {
         /// Display the generated mnemonic (DANGEROUS — only for backup)
         #[arg(long)]
         show_mnemonic: bool,
+        /// Secure wallet with a passkey instead of a passphrase
+        #[arg(long)]
+        passkey: bool,
     },
     /// Import an existing wallet from a mnemonic or private key
     Import {
@@ -83,12 +92,18 @@ enum WalletCommands {
         /// Account index for HD derivation (mnemonic only)
         #[arg(long, default_value = "0")]
         index: u32,
+        /// Secure wallet with a passkey instead of a passphrase
+        #[arg(long)]
+        passkey: bool,
     },
     /// Export wallet secret (mnemonic or private key) to stdout
     Export {
         /// Wallet name or ID
         #[arg(long)]
         wallet: String,
+        /// Skip passkey verification (for CI/scripting)
+        #[arg(long)]
+        skip_passkey: bool,
     },
     /// Delete a wallet from the vault
     Delete {
@@ -139,6 +154,9 @@ enum SignCommands {
         /// Output structured JSON instead of raw hex
         #[arg(long)]
         json: bool,
+        /// Skip passkey verification (for CI/scripting)
+        #[arg(long)]
+        skip_passkey: bool,
     },
     /// Sign a transaction (accepts hex-encoded unsigned transaction bytes)
     Tx {
@@ -157,6 +175,9 @@ enum SignCommands {
         /// Output structured JSON instead of raw hex
         #[arg(long)]
         json: bool,
+        /// Skip passkey verification (for CI/scripting)
+        #[arg(long)]
+        skip_passkey: bool,
     },
     /// Sign and broadcast a transaction
     SendTx {
@@ -178,6 +199,9 @@ enum SignCommands {
         /// Override configured RPC URL
         #[arg(long)]
         rpc_url: Option<String>,
+        /// Skip passkey verification (for CI/scripting)
+        #[arg(long)]
+        skip_passkey: bool,
     },
 }
 
@@ -204,6 +228,41 @@ enum MnemonicCommands {
 enum ConfigCommands {
     /// Show current configuration and RPC endpoints
     Show,
+}
+
+#[cfg(feature = "passkey")]
+#[derive(Subcommand)]
+enum AuthCommands {
+    /// Register a passkey for a wallet (opens browser for Touch ID / security key)
+    Setup {
+        /// Wallet name or ID
+        #[arg(long)]
+        wallet: String,
+        /// Label for the passkey (e.g. "MacBook Touch ID")
+        #[arg(long, default_value = "")]
+        label: String,
+    },
+    /// Remove passkey from a wallet, switching back to passphrase
+    Remove {
+        /// Wallet name or ID
+        #[arg(long)]
+        wallet: String,
+        /// Confirm removal (required)
+        #[arg(long)]
+        confirm: bool,
+    },
+    /// Show auth method and passkey info for a wallet
+    Status {
+        /// Wallet name or ID
+        #[arg(long)]
+        wallet: String,
+    },
+    /// Test passkey authentication for a wallet
+    Verify {
+        /// Wallet name or ID
+        #[arg(long)]
+        wallet: String,
+    },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -265,15 +324,27 @@ fn run(cli: Cli) -> Result<(), CliError> {
                 name,
                 words,
                 show_mnemonic,
-            } => commands::wallet::create(&name, words, show_mnemonic),
+                passkey,
+            } => commands::wallet::create(&name, words, show_mnemonic, passkey),
             WalletCommands::Import {
                 name,
                 mnemonic,
                 private_key,
                 chain,
                 index,
-            } => commands::wallet::import(&name, mnemonic, private_key, chain.as_deref(), index),
-            WalletCommands::Export { wallet } => commands::wallet::export(&wallet),
+                passkey,
+            } => commands::wallet::import(
+                &name,
+                mnemonic,
+                private_key,
+                chain.as_deref(),
+                index,
+                passkey,
+            ),
+            WalletCommands::Export {
+                wallet,
+                skip_passkey,
+            } => commands::wallet::export(&wallet, skip_passkey),
             WalletCommands::Delete { wallet, confirm } => {
                 commands::wallet::delete(&wallet, confirm)
             }
@@ -292,6 +363,7 @@ fn run(cli: Cli) -> Result<(), CliError> {
                 typed_data,
                 index,
                 json,
+                skip_passkey,
             } => commands::sign_message::run(
                 &chain,
                 &wallet,
@@ -300,6 +372,7 @@ fn run(cli: Cli) -> Result<(), CliError> {
                 typed_data.as_deref(),
                 index,
                 json,
+                skip_passkey,
             ),
             SignCommands::Tx {
                 chain,
@@ -307,7 +380,8 @@ fn run(cli: Cli) -> Result<(), CliError> {
                 tx,
                 index,
                 json,
-            } => commands::sign_transaction::run(&chain, &wallet, &tx, index, json),
+                skip_passkey,
+            } => commands::sign_transaction::run(&chain, &wallet, &tx, index, json, skip_passkey),
             SignCommands::SendTx {
                 chain,
                 wallet,
@@ -315,6 +389,7 @@ fn run(cli: Cli) -> Result<(), CliError> {
                 index,
                 json,
                 rpc_url,
+                skip_passkey,
             } => commands::send_transaction::run(
                 &chain,
                 &wallet,
@@ -322,7 +397,15 @@ fn run(cli: Cli) -> Result<(), CliError> {
                 index,
                 json,
                 rpc_url.as_deref(),
+                skip_passkey,
             ),
+        },
+        #[cfg(feature = "passkey")]
+        Commands::Auth { subcommand } => match subcommand {
+            AuthCommands::Setup { wallet, label } => commands::auth::setup(&wallet, &label),
+            AuthCommands::Remove { wallet, confirm } => commands::auth::remove(&wallet, confirm),
+            AuthCommands::Status { wallet } => commands::auth::status(&wallet),
+            AuthCommands::Verify { wallet } => commands::auth::verify(&wallet),
         },
         Commands::Mnemonic { subcommand } => match subcommand {
             MnemonicCommands::Generate { words } => commands::generate::run(words),

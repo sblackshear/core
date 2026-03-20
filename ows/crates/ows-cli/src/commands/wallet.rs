@@ -4,15 +4,30 @@ use crate::audit;
 use crate::CliError;
 use zeroize::Zeroize;
 
-pub fn create(name: &str, words: u32, show_mnemonic: bool) -> Result<(), CliError> {
+pub fn create(name: &str, words: u32, show_mnemonic: bool, passkey: bool) -> Result<(), CliError> {
     // Generate mnemonic, then import it to create the wallet
     let mut mnemonic_phrase = ows_lib::generate_mnemonic(words)?;
     let info = ows_lib::import_wallet_mnemonic(name, &mnemonic_phrase, None, Some(0), None)?;
 
     audit::log_wallet_created(&info);
 
+    // If --passkey, register a passkey and update the wallet metadata
+    #[cfg(feature = "passkey")]
+    if passkey {
+        setup_passkey_for_wallet(&info.id, name)?;
+    }
+    #[cfg(not(feature = "passkey"))]
+    if passkey {
+        return Err(CliError::InvalidArgs(
+            "passkey feature is not enabled".into(),
+        ));
+    }
+
     println!("Wallet created: {}", info.id);
     println!("Name:           {name}");
+    if passkey {
+        println!("Auth:           passkey");
+    }
     println!();
     for acct in &info.accounts {
         println!("  {} → {}", acct.chain_id, acct.address);
@@ -23,8 +38,8 @@ pub fn create(name: &str, words: u32, show_mnemonic: bool) -> Result<(), CliErro
 
     if show_mnemonic {
         eprintln!();
-        eprintln!("⚠️  WARNING: The mnemonic below provides FULL ACCESS to this wallet.");
-        eprintln!("⚠️  Store it securely offline. It will NOT be shown again.");
+        eprintln!("WARNING: The mnemonic below provides FULL ACCESS to this wallet.");
+        eprintln!("Store it securely offline. It will NOT be shown again.");
         eprintln!();
         println!("{mnemonic_phrase}");
     } else {
@@ -43,6 +58,7 @@ pub fn import(
     use_private_key: bool,
     chain: Option<&str>,
     index: u32,
+    passkey: bool,
 ) -> Result<(), CliError> {
     // Read curve-specific keys from environment variables (cleared immediately after reading)
     let secp256k1_key = ows_signer::process_hardening::clear_env_var("OWS_SECP256K1_KEY");
@@ -89,8 +105,23 @@ pub fn import(
 
     audit::log_wallet_imported(&info);
 
+    // If --passkey, register a passkey and update the wallet metadata
+    #[cfg(feature = "passkey")]
+    if passkey {
+        setup_passkey_for_wallet(&info.id, name)?;
+    }
+    #[cfg(not(feature = "passkey"))]
+    if passkey {
+        return Err(CliError::InvalidArgs(
+            "passkey feature is not enabled".into(),
+        ));
+    }
+
     println!("Wallet imported: {}", info.id);
     println!("Name:            {name}");
+    if passkey {
+        println!("Auth:            passkey");
+    }
     println!();
     for acct in &info.accounts {
         println!("  {} → {}", acct.chain_id, acct.address);
@@ -102,12 +133,43 @@ pub fn import(
     Ok(())
 }
 
-pub fn export(wallet_name: &str) -> Result<(), CliError> {
+/// Register a passkey for a newly created wallet and update its metadata.
+#[cfg(feature = "passkey")]
+fn setup_passkey_for_wallet(wallet_id: &str, wallet_name: &str) -> Result<(), CliError> {
+    match ows_auth::run_registration(wallet_id, "default") {
+        Ok(ows_auth::AuthResult::Registered { .. }) => {
+            // Update wallet metadata to passkey auth
+            let mut wallet = ows_lib::vault::load_wallet_by_name_or_id(wallet_id, None)?;
+            wallet.metadata = serde_json::json!({ "auth_method": "passkey" });
+            ows_lib::vault::save_encrypted_wallet(&wallet, None)?;
+            eprintln!("Passkey registered for wallet '{wallet_name}'.");
+            Ok(())
+        }
+        Ok(_) => Ok(()),
+        Err(e) => {
+            eprintln!("warning: passkey registration failed: {e}");
+            eprintln!("Wallet created with passphrase auth (empty passphrase).");
+            eprintln!("Run `ows auth setup --wallet {wallet_name}` to try again.");
+            Ok(())
+        }
+    }
+}
+
+pub fn export(wallet_name: &str, skip_passkey: bool) -> Result<(), CliError> {
     if !std::io::stdin().is_terminal() {
         return Err(CliError::InvalidArgs(
             "wallet export requires an interactive terminal (do not pipe stdin)".into(),
         ));
     }
+
+    // Check passkey auth before export
+    #[cfg(feature = "passkey")]
+    {
+        let wallet = crate::vault::load_wallet_by_name_or_id(wallet_name)?;
+        super::auth::require_passkey_for_wallet(&wallet, skip_passkey)?;
+    }
+    #[cfg(not(feature = "passkey"))]
+    let _ = skip_passkey;
 
     // Try empty passphrase first, then prompt if it fails
     let mut exported = match ows_lib::export_wallet(wallet_name, None, None) {
@@ -148,6 +210,14 @@ pub fn delete(wallet_name: &str, confirm: bool) -> Result<(), CliError> {
     ows_lib::delete_wallet(wallet_name, None)?;
     audit::log_wallet_deleted(&info.id, &info.name);
 
+    // Clean up any passkey data for this wallet
+    #[cfg(feature = "passkey")]
+    {
+        if let Ok(mut store) = ows_auth::store::load_or_create_store() {
+            let _ = ows_auth::store::remove_wallet_passkeys(&mut store, &info.id);
+        }
+    }
+
     println!("Wallet deleted: {} ({})", info.id, info.name);
     Ok(())
 }
@@ -172,7 +242,26 @@ pub fn list() -> Result<(), CliError> {
     for w in &wallets {
         println!("ID:      {}", w.id);
         println!("Name:    {}", w.name);
-        println!("Secured: ✓ (encrypted)");
+
+        #[cfg(feature = "passkey")]
+        {
+            // Load the raw wallet to check metadata
+            if let Ok(raw) = crate::vault::load_wallet_by_name_or_id(&w.id) {
+                let method = super::auth::get_auth_method(&raw);
+                if method == "passkey" {
+                    println!("Auth:    passkey");
+                } else {
+                    println!("Secured: encrypted (passphrase)");
+                }
+            } else {
+                println!("Secured: encrypted");
+            }
+        }
+        #[cfg(not(feature = "passkey"))]
+        {
+            println!("Secured: encrypted");
+        }
+
         for acct in &w.accounts {
             println!("  {} → {}", acct.chain_id, acct.address);
         }

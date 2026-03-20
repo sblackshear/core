@@ -11,9 +11,10 @@ pub fn run(
     typed_data: Option<&str>,
     index: u32,
     json_output: bool,
+    skip_passkey: bool,
 ) -> Result<(), CliError> {
     let chain = parse_chain(chain_str)?;
-    let key = super::resolve_signing_key(wallet_name, chain.chain_type, index)?;
+    let key = super::resolve_signing_key(wallet_name, chain.chain_type, index, skip_passkey)?;
 
     let signer = signer_for_chain(chain.chain_type);
 

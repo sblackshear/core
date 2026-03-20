@@ -1,0 +1,30 @@
+[package]
+name = "ows-pay"
+version = "0.3.9"
+edition = "2021"
+license = "MIT"
+description = "Self-contained x402 and MPP payment client for the Open Wallet Standard"
+repository = "https://github.com/open-wallet-standard/core"
+
+[dependencies]
+# OWS — only used for wallet access + signing
+ows-lib = { path = "../ows-lib", version = "=0.3.9" }
+
+# HTTP client
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Encoding
+base64 = "0.22"
+hex = "0.4"
+
+# Errors
+thiserror = "2"
+
+# Misc
+getrandom = "0.2"
+chrono = "0.4"
